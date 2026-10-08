@@ -1,0 +1,9 @@
+[workspace]
+name = "picorv32"
+id = "picorv32-pads-2d6f41a0"
+environment = "default"
+environments = [ "picorv32_ignytion", "default",]
+
+[workspace.metadata]
+managed = false
+created_by = "crucible-core"
