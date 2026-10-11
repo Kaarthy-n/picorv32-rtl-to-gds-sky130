@@ -28,6 +28,76 @@ Pad placement and cell orientation are computed in
 `06_floorplanning/openroad_floorplan.tcl` from the instance names
 (`padring.i<side>.ipad[n]`), so the ring order follows the CELLMAP in the RTL.
 
+## ASIC results
+
+Post-route numbers for this flow (SKY130 HD, TT 025C 1.80 V, 50 MHz target).
+Sources: `04_synthesis/synth.log`, `final_output/reports/` and an OpenROAD
+report on `09_place_and_route/route.odb`. "Gate equivalents" = std-cell area
+(excluding tap/fill/pads/SRAM) / 3.75 um² (one NAND2_1).
+
+| Metric | Value |
+|---|---|
+| Die size | 1504 x 1504 um (2.262 mm²) |
+| Core size | ~964 x 960 um (0.925 mm²) |
+| Std-cell area (post-route, logic + clock/repair buffers) | 82,728 um² |
+| Synthesis area (logic only) | 76,851 um² (56 % sequential) |
+| SRAM macro area (2 KB OpenRAM) | 284,538 um² |
+| Pad area (40 gpio + 16 supply + 4 corner) | 1,075,846 um² |
+| Std-cell instances (logic, excl. tap/fill) | 7,426 |
+| Logic gates (combinational + inverters) | 5,356 + 140 inverters |
+| Flip-flops | 1,543 (318 `dfxtp_1` + 1,225 `edfxtp_1`) |
+| Gate equivalents (NAND2) | ~22 k |
+| Clock buffers / timing-repair buffers | 190 (+15 clk inverters) / 197 |
+| Macros / IO pads | 1 SRAM / 40 gpio + 16 supply |
+| Target clock | 50 MHz (20 ns) |
+| Fmax (post-route estimate) | ~112 MHz (min period 8.92 ns) |
+| Setup / hold WNS (TT) | 0.00 (met); worst setup slack 7.66 ns, worst hold slack 0.43 ns |
+| Setup / hold WNS (SS 100C 1.60 V) | 0.00 (met); worst setup slack 5.51 ns, worst hold slack 0.86 ns |
+| Power, total (default activity) | 16.2 mW (SRAM macro 16.0 mW, std cells 0.15 mW) |
+| Static IR drop (vdd / vss worst) | 0.64 mV (0.04 %) / 1.87 mV (0.10 %) |
+| Route DRC (TritonRoute) | 0 violations |
+| Magic DRC | 0 errors |
+| LVS (core logic, pads/SRAM blackboxed) | see `final_output/reports/netgen_lvs.log` |
+
+### Comparison with the SiliconCompiler padring run
+
+Compared against the SiliconCompiler `padring` project
+(`build/padring/job0/write.views/0/reports/`, `metrics.json`) for the same
+`picorv32_top`. Both runs end with the same 1,543 flip-flops; the differences
+come from die size, what is counted, and how power/timing were set up.
+
+| Metric | This flow (OpenROAD + Crucible) | SiliconCompiler padring | Note |
+|---|---|---|---|
+| Die size | 1504 x 1504 um (2.262 mm²) | 1900 x 1900 um (3.61 mm²) | this flow is ~37 % smaller |
+| Core area | 0.925 mm² | 1.956 mm² | |
+| Std-cell instances (excl. tap/fill) | 7,426 | 7,592 (1,543 seq + 5,538 comb + 216 inv + 295 buffers) | |
+| Flip-flops | 1,543 | 1,543 | identical |
+| Combinational cells | 5,356 | 5,538 | |
+| Std-cell logic area | 82,728 um² | 80,144 um² | |
+| Gate equivalents (NAND2) | ~22.0 k | ~21.4 k | |
+| Timing-repair buffers | 197 (+190 clock buffers) | 295 | |
+| Tap cells | 8,338 | 22,130 | SC taps are denser |
+| Fill cells | 1,018 | 193,916 | SC inserts filler across the whole core |
+| Total instances | 16,843 | 223,963 | mostly SC fill |
+| SRAM macro | 1 x 284,538 um² | 1 x 284,538 um² | same macro |
+| gpio / supply pads | 40 / 16 | 40 / 16 | same |
+| Pad spacers (bus slices) | not instantiated (pads abut) | 208 | |
+| Corner cells | 4 | 4 | |
+| Core utilization (instances / die) | 41 % | 28 % (std-cell only: 16 %) | |
+| Clock | 50 MHz | 100 MHz field in metrics | |
+| Setup / hold WNS | met (7.66 / 0.43 ns worst slack) | not meaningful: ws = 1e39, 2,858 unconstrained endpoints | SC run has no real clock constraint on the pads |
+| Fmax | ~112 MHz | 100 MHz (constraint value) | |
+| Total power | 16.2 mW | 0.47 mW | SC models the SRAM at near-zero activity |
+| Static IR drop, vdd worst | 0.64 mV (1.80 V supply) | 0.14 mV (1.95 V supply) | |
+| Static IR drop, vss worst | 1.87 mV | 0.18 mV | |
+| DRV violations | 0 route DRC | slew 6, cap 6, 4 floating nets, 4 overdriven nets (per metrics.json) | |
+| Flow errors | 0 | 0 (8 warnings) | |
+
+The power and IR numbers are not like for like: this flow uses OpenROAD's
+default activity and a 1.80 V supply, while the SiliconCompiler run reports a
+1.95 V supply and a much lower activity, so the SRAM contributes almost nothing.
+Treat the cell counts and area as the meaningful comparison.
+
 ## Flow stages
 
 Each stage is a numbered directory with its own `Makefile`, driven from the
@@ -81,6 +151,33 @@ igny status            # confirm environment + tool count
 ```
 
 ## Notes
+
+### How the pad ring, corner cells and SRAM were added
+
+**The design in two lines:** `picorv32_top` wraps a PicoRV32 RV32I core with a
+2 KB OpenRAM SRAM that holds the program and data. A `sky130_ef_io` pad ring
+(40 gpio + supply pads) surrounds it so the chip is fully padded out.
+
+The standard `sky130_fd_sc_hd` flow knows nothing about IO pads, corners or
+SRAM macros, so they are brought in by hand from the PDK's separate
+`sky130_fd_io` and `sky130_sram_macros` libraries:
+
+- **Pads:** the gpio and supply pads (`gpiov2_pad_wrapped`, `vccd/vssd/vddio/vssio_hvc_pad`) are instantiated in
+  the RTL by the `la_padring` wrapper. They stay blackboxes in Yosys
+  (`sky130_ef_io.v` read with `-lib`) and are placed from `sky130_ef_io.lef` in the floorplan.
+  Positions and orientations are derived from the instance names, and the
+  pads butt together so the ring buses connect by abutment.
+- **Corner cells:** `sky130_ef_io__corner_pad` is physical-only and is not in
+  the netlist, so `openroad_floorplan.tcl` creates the four corners directly in
+  OpenDB (`odb::dbInst_create`) at the die corners with the right rotations.
+- **SRAM:** `sky130_sram_2kbyte_1rw1r_32x512_8` is instantiated by `la_spram`,
+  read as a blackbox in synthesis, fixed in the lower half of the core, and
+  given its own `define_pdn_grid -macro` so its met4 supply pins join the met5 straps.
+- **Libraries and views:** the pad/SRAM `.lib` files (`pdk_libs.tcl`) are loaded
+  for STA, their LEF in the floorplan, and their GDS in `10_gds`
+  (`sky130_ef_io.gds`, `sky130_ef_io__gpiov2_pad_wrapped.gds`, SRAM GDS) for
+  stream-out. Simulation uses the PDK Verilog models with `-DFUNCTIONAL
+  -DUSE_POWER_PINS`; LVS treats pads and SRAM as black boxes.
 
 - The image above is a 2048 px copy of `final_output/images/picorv32_top.png`, which
   `make final` renders (8192 px) from `10_gds/picorv32_top.gds`; refresh it with
